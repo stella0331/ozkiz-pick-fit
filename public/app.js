@@ -85,21 +85,94 @@ function cellKey(modelId, columnId) {
   return modelId + "__" + columnId;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Retries a failed request a few times with backoff — pagination involves
+// many sequential requests, and a single transient network hiccup shouldn't
+// abort the whole sync.
+async function fetchJSONWithRetry(url, options, retries = 3) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetchJSON(url, options);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) await sleep(500 * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
+
 // ---------- Data load ----------
-async function loadCatalog(forceRefresh = false) {
-  el.syncStatus.textContent = forceRefresh ? "노션에서 새로 불러오는 중… (시간이 걸릴 수 있어요)" : "불러오는 중…";
-  const q = forceRefresh ? "?refresh=1" : "";
-  const [{ models, syncedAt: modelsSyncedAt }, { products, syncedAt }] = await Promise.all([
-    fetchJSON("/api/models" + q),
-    fetchJSON("/api/products" + q),
-  ]);
+async function fetchPage(endpoint, cursor) {
+  const q = cursor ? "?cursor=" + encodeURIComponent(cursor) : "";
+  return fetchJSONWithRetry(endpoint + q);
+}
+
+async function fetchAllPages(endpoint, label) {
+  let cursor = undefined;
+  let items = [];
+  do {
+    const data = await fetchPage(endpoint, cursor);
+    items = items.concat(data.items);
+    cursor = data.hasMore ? data.nextCursor : undefined;
+    el.syncStatus.textContent = `${label} 불러오는 중… (${items.length}개)`;
+  } while (cursor);
+  return items;
+}
+
+function applyCatalog(models, products, syncedAt) {
   state.models = models.filter((m) => m.name);
   state.products = products.filter((p) => p.name);
   state.modelsById = new Map(state.models.map((m) => [m.id, m]));
   state.productsById = new Map(state.products.map((p) => [p.id, p]));
-  const latest = syncedAt || modelsSyncedAt;
-  const timeLabel = latest ? new Date(latest).toLocaleString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "";
+  const timeLabel = syncedAt
+    ? new Date(syncedAt).toLocaleString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+    : "";
   el.syncStatus.textContent = `모델 ${state.models.length}명 · 제품 ${state.products.length}개${timeLabel ? " · 동기화 " + timeLabel : ""}`;
+}
+
+// Fetches everything fresh from Notion, page by page (each request stays
+// well under the function time limit), then commits the full lists to the
+// cache in one shot each.
+async function fullSync() {
+  const [products, models] = await Promise.all([
+    fetchAllPages("/api/products-page", "제품"),
+    fetchAllPages("/api/models-page", "모델"),
+  ]);
+  const [productsRes] = await Promise.all([
+    fetchJSONWithRetry("/api/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ products }),
+    }),
+    fetchJSONWithRetry("/api/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models }),
+    }),
+  ]);
+  applyCatalog(models, products, productsRes.syncedAt);
+}
+
+async function loadCatalog(forceRefresh = false) {
+  if (forceRefresh) {
+    await fullSync();
+    return;
+  }
+  el.syncStatus.textContent = "불러오는 중…";
+  const [modelsRes, productsRes] = await Promise.all([
+    fetchJSONWithRetry("/api/models"),
+    fetchJSONWithRetry("/api/products"),
+  ]);
+  if (!productsRes.syncedAt) {
+    // No cache yet (first ever load) — do a full sync now.
+    await fullSync();
+    return;
+  }
+  applyCatalog(modelsRes.models, productsRes.products, productsRes.syncedAt);
 }
 
 async function loadShoots() {
@@ -141,7 +214,7 @@ function showView(view) {
 
   if (view === "home") {
     el.brandTitle.textContent = "오즈키즈 픽앤핏";
-    el.brandSub.textContent = "OZKIZ · Individuelle";
+    el.brandSub.textContent = "OZKIZ";
   } else {
     const shoot = state.shoots.find((s) => s.id === state.currentShootId);
     el.brandTitle.textContent = shoot ? shoot.title : "";
