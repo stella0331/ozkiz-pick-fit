@@ -119,6 +119,7 @@ async function fetchAllPages(endpoint, label) {
     items = items.concat(data.items);
     cursor = data.hasMore ? data.nextCursor : undefined;
     el.syncStatus.textContent = `${label} 불러오는 중… (${items.length}개)`;
+    if (cursor) await sleep(250); // pace requests to stay clear of Notion's rate limit
   } while (cursor);
   return items;
 }
