@@ -86,17 +86,20 @@ function cellKey(modelId, columnId) {
 }
 
 // ---------- Data load ----------
-async function loadCatalog() {
-  el.syncStatus.textContent = "노션에서 불러오는 중…";
-  const [{ models }, { products }] = await Promise.all([
-    fetchJSON("/api/models"),
-    fetchJSON("/api/products"),
+async function loadCatalog(forceRefresh = false) {
+  el.syncStatus.textContent = forceRefresh ? "노션에서 새로 불러오는 중… (시간이 걸릴 수 있어요)" : "불러오는 중…";
+  const q = forceRefresh ? "?refresh=1" : "";
+  const [{ models, syncedAt: modelsSyncedAt }, { products, syncedAt }] = await Promise.all([
+    fetchJSON("/api/models" + q),
+    fetchJSON("/api/products" + q),
   ]);
   state.models = models.filter((m) => m.name);
   state.products = products.filter((p) => p.name);
   state.modelsById = new Map(state.models.map((m) => [m.id, m]));
   state.productsById = new Map(state.products.map((p) => [p.id, p]));
-  el.syncStatus.textContent = `모델 ${state.models.length}명 · 제품 ${state.products.length}개 불러옴`;
+  const latest = syncedAt || modelsSyncedAt;
+  const timeLabel = latest ? new Date(latest).toLocaleString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "";
+  el.syncStatus.textContent = `모델 ${state.models.length}명 · 제품 ${state.products.length}개${timeLabel ? " · 동기화 " + timeLabel : ""}`;
 }
 
 async function loadShoots() {
@@ -109,7 +112,7 @@ el.syncBtn.addEventListener("click", async () => {
   const prevLabel = el.syncBtn.textContent;
   el.syncBtn.textContent = "동기화 중…";
   try {
-    await loadCatalog();
+    await loadCatalog(true);
     // Re-render whatever product/model data is currently on screen.
     if (state.currentView === "editor" && !el.modelPickStep.hidden) {
       renderModelPickGrid();
