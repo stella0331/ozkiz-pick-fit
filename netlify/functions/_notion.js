@@ -1,6 +1,10 @@
 const NOTION_VERSION = "2022-06-28";
 
-async function notionFetch(path, options = {}) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function notionFetch(path, options = {}, retriesLeft = 3) {
   const token = process.env.NOTION_TOKEN;
   if (!token) {
     throw new Error("NOTION_TOKEN 환경변수가 설정되지 않았습니다.");
@@ -14,6 +18,18 @@ async function notionFetch(path, options = {}) {
       ...(options.headers || {}),
     },
   });
+  if (res.status === 429 && retriesLeft > 0) {
+    // Notion asks us to back off for a bit — honor it and retry.
+    let waitSeconds = 2;
+    try {
+      const data = await res.json();
+      waitSeconds = Number(data?.additional_data?.retry_after) || 2;
+    } catch {
+      /* ignore parse errors, use default wait */
+    }
+    await sleep((waitSeconds + 0.5) * 1000);
+    return notionFetch(path, options, retriesLeft - 1);
+  }
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Notion API 오류 (${res.status}): ${body}`);
@@ -36,6 +52,19 @@ async function queryDatabase(databaseId, extraBody = {}) {
     cursor = data.has_more ? data.next_cursor : undefined;
   } while (cursor);
   return results;
+}
+
+// Query a single page of a database (one Notion API call). Used to fetch
+// large databases page-by-page from the client instead of looping inside
+// one function invocation, which can exceed the function time limit.
+async function queryDatabasePage(databaseId, cursor) {
+  const body = { page_size: 100 };
+  if (cursor) body.start_cursor = cursor;
+  const data = await notionFetch(`/databases/${databaseId}/query`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return { results: data.results, hasMore: data.has_more, nextCursor: data.next_cursor };
 }
 
 async function retrievePage(pageId) {
@@ -79,6 +108,7 @@ function getDate(page, propName) {
 module.exports = {
   notionFetch,
   queryDatabase,
+  queryDatabasePage,
   retrievePage,
   getTitle,
   getSelect,
